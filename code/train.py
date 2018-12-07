@@ -3,7 +3,8 @@ import subprocess
 import tensorflow as tf
 import threading
 import numpy as np
-import scipy.io
+# import scipy.io
+import provider
 from datetime import datetime
 import json
 import os
@@ -23,6 +24,8 @@ parser.add_argument('--output_dir', type=str, default='train_results', help='Dir
 parser.add_argument('--wd', type=float, default=0, help='Weight Decay [Default: 0.0]')
 FLAGS = parser.parse_args()
 
+hdf5_data_dir = os.path.join(BASE_DIR, './hdf5_data')
+
 # MAIN SCRIPT
 batch_size = FLAGS.batch
 output_dir = FLAGS.output_dir
@@ -37,13 +40,18 @@ LEARNING_RATE = 1e-4
 TRAINING_EPOCHES = FLAGS.epoch
 print('### Training epoch: {0}'.format(TRAINING_EPOCHES))
 
-def get_file_name(file_path):
-    parts = file_path.split('/')
-    part = parts[-1]
-    parts = part.split('.')
-    return parts[0]
+# def get_file_name(file_path):
+#     parts = file_path.split('/')
+#     part = parts[-1]
+#     parts = part.split('.')
+#     return parts[0]
+# TRAINING_FILE_LIST = [get_file_name(file_name) for file_name in glob.glob('../data/ShapeNet/train/' + '*.mat')]
 
-TRAINING_FILE_LIST = [get_file_name(file_name) for file_name in glob.glob('../data/ShapeNet/train/' + '*.mat')]
+def getDataFiles(list_filename):
+    return [line.rstrip() for line in open(list_filename)]
+
+TRAINING_FILE_LIST = provider.getDataFiles(os.path.join(hdf5_data_dir, 'train_hdf5_file_list.txt'))
+
 
 MODEL_STORAGE_PATH = os.path.join(output_dir, 'trained_models')
 if not os.path.exists(MODEL_STORAGE_PATH):
@@ -65,16 +73,28 @@ def load_and_enqueue(sess, enqueue_op, pointgrid_ph, cat_label_ph, seg_label_ph)
     for epoch in range(1000 * TRAINING_EPOCHES):
         train_file_idx = np.arange(0, len(TRAINING_FILE_LIST))
         np.random.shuffle(train_file_idx)
-        for loop in range(len(TRAINING_FILE_LIST)):
-            mat_content = scipy.io.loadmat('../data/ShapeNet/train/' + TRAINING_FILE_LIST[train_file_idx[loop]] + '.mat')
-            pc = mat_content['points']
-            labels = np.squeeze(mat_content['labels'])
-            category = mat_content['category'][0][0]
-            pc = model.rotate_pc(pc)
-            cat_label = model.integer_label_to_one_hot_label(category)
-            seg_label = model.integer_label_to_one_hot_label(labels)
-            pointgrid, pointgrid_label, _ = model.pc2voxel(pc, seg_label)
-            sess.run(enqueue_op, feed_dict={pointgrid_ph: pointgrid, cat_label_ph: cat_label, seg_label_ph: pointgrid_label})
+        for loop in range(0, len(TRAINING_FILE_LIST)):
+            # mat_content = scipy.io.loadmat('../data/ShapeNet/train/' + TRAINING_FILE_LIST[train_file_idx[loop]] + '.mat')
+            # pc = mat_content['points']
+            # labels = np.squeeze(mat_content['labels'])
+            # category = mat_content['category'][0][0]
+            cur_train_filename = os.path.join(hdf5_data_dir, TRAINING_FILE_LIST[train_file_idx[loop]])
+            print('Loading train file ' + cur_train_filename)
+
+            cur_data, cur_labels, cur_seg = provider.loadDataFile_with_seg(cur_train_filename)
+            cur_data, cur_labels, order = provider.shuffle_data(cur_data, np.squeeze(cur_labels))
+            cur_seg = cur_seg[order, ...]
+            
+            for pc_idx in range(0, len(cur_data)):
+            	pc = cur_data[pc_idx]
+            	category = cur_labels[pc_idx]
+            	labels = cur_seg[pc_idx]
+
+                pc = model.rotate_pc(pc)
+                cat_label = model.integer_label_to_one_hot_label(category)
+                seg_label = model.integer_label_to_one_hot_label(labels)
+                pointgrid, pointgrid_label, _ = model.pc2voxel(pc, seg_label)
+                sess.run(enqueue_op, feed_dict={pointgrid_ph: pointgrid, cat_label_ph: cat_label, seg_label_ph: pointgrid_label})
 
 def placeholder_inputs():
     pointgrid_ph = tf.placeholder(tf.float32, shape=(model.N, model.N, model.N, model.NUM_FEATURES))
